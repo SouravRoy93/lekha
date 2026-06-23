@@ -369,8 +369,8 @@
 
       <div class="auth-divider">or</div>
       <div class="auth-soc">
-        <button onclick="toast('Social sign-in is coming soon — use email for now')">G  Google</button>
-        <button onclick="toast('Social sign-in is coming soon — use email for now')">⌘  Apple</button>
+        <button onclick="signInOAuth('google')">G  Google</button>
+        <button onclick="signInOAuth('apple')">⌘  Apple</button>
       </div>
 
       <div class="auth-foot">
@@ -511,6 +511,7 @@ function saveState(){
   state.lastSync = Date.now();
   localStorage.setItem(LS_KEY, JSON.stringify(state));
   refreshSyncedAgo();
+  if(window.cloudReady && window.sb){ scheduleCloudPush(); }
 }
 
 function refreshSyncedAgo(){
@@ -691,7 +692,7 @@ function sampleWorkspace(){
   }
 }
 
-function uid(){ return Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4); }
+function uid(){ return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){var r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16);}); }
 
 /* ---------- WORKSPACE HELPERS ---------- */
 function ws(){ return state.workspaces.find(w=>w.id===state.currentWorkspaceId); }
@@ -2779,12 +2780,19 @@ function enterApp(){
   setTimeout(updateNotifBadge, 100);
 }
 
-// --- Supabase auth gating (Phase 1: real login; books still local) ---
-function onAuthedSession(session){
+// --- Supabase cloud sync (Phase 2: per-user books in Postgres) ---
+window.cloudReady = false;
+var currentUser = null;
+function capWord(s){ return s ? s.charAt(0).toUpperCase()+s.slice(1) : s; }
+var _money = function(v){ return v==null ? 0 : Number(v)/100; };
+
+async function onAuthedSession(session){
   if(!session) return;
   var email = session.user.email;
   var name = (session.user.user_metadata && session.user.user_metadata.full_name) || (email ? email.split('@')[0] : 'User');
-  if(!state){ state = createInitialState({email: email, name: name}); saveState(); }
+  currentUser = { id: session.user.id, email: email, name: name };
+  try { await cloudBootstrap(email, name); }
+  catch(e){ console.error('Cloud sync unavailable; using local cache.', e); toast('Working offline — cloud sync unavailable', true); }
   enterApp();
 }
 function bootAuth(){
@@ -2796,10 +2804,72 @@ function bootAuth(){
 window.onSupabaseAuth = function(session){
   if(session){ onAuthedSession(session); }
   else {
+    window.cloudReady = false;
     document.getElementById('app').classList.remove('show');
     document.getElementById('authScreen').style.display='grid';
   }
 };
+
+async function cloudBootstrap(email, name){
+  var sb = window.sb;
+  var res = await sb.from('workspaces').select('*');
+  if(res.error) throw res.error;
+  var wss = res.data || [];
+  if(wss.length){
+    var built = [];
+    for(var i=0;i<wss.length;i++){ built.push(await cloudPullWorkspace(wss[i])); }
+    state = { user:{email:email,name:name,role:'Admin'}, workspaces: built, currentWorkspaceId: built[0].id, lastSync: Date.now() };
+    window.cloudReady = true;
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  } else {
+    if(!state || !state.workspaces || !state.workspaces.length){ state = createInitialState({email:email,name:name}); }
+    else { state.user = {email:email,name:name,role:'Admin'}; }
+    window.cloudReady = true;
+    for(var j=0;j<state.workspaces.length;j++){
+      var w = state.workspaces[j];
+      var ins = await sb.from('workspaces').insert({ id:w.id, name:w.name, gstin:(w.gstin&&w.gstin.length===15?w.gstin:null), address:w.address, base_currency:w.currency||'INR', color:w.color, color2:w.color2, initial:w.initial, created_by: currentUser.id });
+      if(ins.error) throw ins.error;
+      await cloudPush(w);
+    }
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  }
+}
+
+async function cloudPullWorkspace(w){
+  var sb = window.sb, id = w.id;
+  function q(t){ return sb.from(t).select('*').eq('workspace_id', id); }
+  var out = await Promise.all([q('customers'),q('vendors'),q('items'),q('accounts'),q('invoices'),q('invoice_lines'),q('bills'),q('bill_lines'),q('transactions')]);
+  var d = out.map(function(o){ return o.data || []; });
+  var cu=d[0],ve=d[1],it=d[2],ac=d[3],inv=d[4],invl=d[5],bl=d[6],bll=d[7],tx=d[8];
+  function lines(rows, key, idv){ return rows.filter(function(l){return l[key]===idv;}).sort(function(a,b){return a.position-b.position;}).map(function(l){ var price=_money(l.unit_price_minor); return {itemId:l.item_id||undefined, name:l.name, qty:Number(l.qty), price:price, gstRate:Number(l.gst_rate), amount: Math.round(Number(l.qty)*price)}; }); }
+  return {
+    id:id, name:w.name, gstin:w.gstin||'', address:w.address||'', currency:w.base_currency||'INR', fyStart:'Apr 1',
+    color:w.color||'#FFB454', color2:w.color2||'#FF6B9D', initial:w.initial||((w.name||'?').charAt(0)),
+    customers: cu.map(function(c){return {id:c.id,name:c.name,gstin:c.gstin||'',email:c.email||'',phone:c.phone||'',address:c.address||''};}),
+    vendors: ve.map(function(v){return {id:v.id,name:v.name,gstin:v.gstin||'',category:v.category||'',email:v.email||'',phone:v.phone||''};}),
+    items: it.map(function(i){return {id:i.id,name:i.name,hsn:i.hsn||'',price:_money(i.unit_price_minor),gstRate:Number(i.gst_rate),unit:i.unit||'pc'};}),
+    accounts: ac.map(function(a){return {id:a.id,name:a.name,type:capWord(a.type),bank:a.bank||'',last4:a.last4||'',balance:_money(a.balance_minor),color:a.color};}),
+    invoices: inv.map(function(i){return {id:i.id,number:i.number,customerId:i.customer_id,currency:i.currency,issued:i.issue_date,due:i.due_date,status:i.status,subtotal:_money(i.subtotal_minor),gst:_money(i.tax_minor),total:_money(i.total_minor),paid:_money(i.paid_minor),paidOn:i.paid_on||undefined,lines:lines(invl,'invoice_id',i.id)};}),
+    bills: bl.map(function(b){return {id:b.id,number:b.number,vendorId:b.vendor_id,issued:b.issue_date,due:b.due_date,status:b.status,subtotal:_money(b.subtotal_minor),gst:_money(b.tax_minor),total:_money(b.total_minor),paid:_money(b.paid_minor),paidOn:b.paid_on||undefined,lines:lines(bll,'bill_id',b.id)};}),
+    transactions: tx.map(function(t){return {id:t.id,accountId:t.account_id,description:t.description,amount:_money(t.amount_minor),type:(Number(t.amount_minor)>=0?'in':'out'),category:t.category,date:t.txn_date,auto:t.is_auto};}),
+    activity: [],
+    invCounter: w.invoice_counter, billCounter: w.bill_counter
+  };
+}
+
+function scheduleCloudPush(){
+  clearTimeout(window._pushTimer);
+  window._pushTimer = setTimeout(function(){ var w = ws(); if(w) cloudPush(w); }, 1200);
+}
+async function cloudPush(w){
+  try { var r = await window.sb.rpc('app_push', { p: w }); if(r.error) throw r.error; }
+  catch(e){ console.error('Cloud push failed', e); }
+}
+async function signInOAuth(provider){
+  if(!window.sb){ toast('Still connecting — try again in a moment', true); return; }
+  var r = await window.sb.auth.signInWithOAuth({ provider: provider, options:{ redirectTo: window.location.href } });
+  if(r.error) toast(r.error.message || 'Sign-in failed', true);
+}
 
 </script>
 <script type="module">
