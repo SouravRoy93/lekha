@@ -370,7 +370,7 @@
       <div class="auth-divider">or</div>
       <div class="auth-soc">
         <button onclick="signInOAuth('google')">G  Google</button>
-        <button onclick="signInOAuth('apple')">⌘  Apple</button>
+        <button onclick="showAuthNotice('Apple sign-in is not enabled yet — please use email and password for now.')">⌘  Apple</button>
       </div>
 
       <div class="auth-foot">
@@ -537,29 +537,32 @@ function toggleAuthMode(){
 }
 
 async function doAuth(){
-  if(!window.sb){ toast('Still connecting to the server — try again in a moment', true); return; }
+  if(!window.sb){ showAuthNotice('Still connecting to the server — try again in a moment.', true); return; }
   const email = document.getElementById('authEmail').value.trim();
   const pw = document.getElementById('authPw').value;
   const name = document.getElementById('authName').value.trim();
-  if(!email || !pw){ toast('Email and password are required', true); return; }
-  const btn = document.getElementById('authBtn'); if(btn) btn.disabled = true;
+  if(!email || !pw){ showAuthNotice('Email and password are required.', true); return; }
+  if(authMode==='signup' && pw.length < 6){ showAuthNotice('Password must be at least 6 characters.', true); return; }
+  const btn = document.getElementById('authBtn');
+  if(btn){ btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = 'Please wait…'; }
   try{
     if(authMode==='signup'){
-      const res = await window.sb.auth.signUp({ email: email, password: pw, options:{ data:{ full_name: name || email.split('@')[0] }, emailRedirectTo: window.location.href } });
+      const res = await window.sb.auth.signUp({ email: email, password: pw, options:{ data:{ full_name: name || email.split('@')[0] }, emailRedirectTo: window.location.origin + window.location.pathname } });
       if(res.error) throw res.error;
       if(res.data && res.data.session){ onAuthedSession(res.data.session); }
-      else { showAuthNotice('Almost there — check your inbox to confirm your email, then sign in.'); }
+      else { showAuthNotice('Account created — check your inbox to confirm your email, then sign in.'); }
     } else {
       const res = await window.sb.auth.signInWithPassword({ email: email, password: pw });
       if(res.error) throw res.error;
       onAuthedSession(res.data.session);
     }
-  }catch(e){ toast((e && e.message) ? e.message : 'Authentication failed', true); }
-  finally{ if(btn) btn.disabled = false; }
+  }catch(e){ showAuthNotice((e && e.message) ? e.message : 'Authentication failed.', true); }
+  finally{ if(btn){ btn.disabled = false; if(btn.dataset.label) btn.textContent = btn.dataset.label; } }
 }
-function showAuthNotice(msg){
+function showAuthNotice(msg, err){
   let el = document.getElementById('authNotice');
-  if(!el){ el = document.createElement('div'); el.id='authNotice'; el.style.cssText='margin-top:14px;font-size:13px;color:var(--brand);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;line-height:1.5'; var card=document.querySelector('.auth-card'); if(card) card.appendChild(el); }
+  if(!el){ el = document.createElement('div'); el.id='authNotice'; var card=document.querySelector('.auth-card'); if(card) card.appendChild(el); }
+  el.style.cssText='margin-top:14px;font-size:13px;border-radius:8px;padding:10px 12px;line-height:1.5;background:var(--surface-2);border:1px solid '+(err?'rgba(240,106,106,.5)':'var(--border)')+';color:'+(err?'#ff8a8a':'var(--brand)');
   el.textContent = msg;
 }
 
@@ -2866,9 +2869,10 @@ async function cloudPush(w){
   catch(e){ console.error('Cloud push failed', e); }
 }
 async function signInOAuth(provider){
-  if(!window.sb){ toast('Still connecting — try again in a moment', true); return; }
-  var r = await window.sb.auth.signInWithOAuth({ provider: provider, options:{ redirectTo: window.location.href } });
-  if(r.error) toast(r.error.message || 'Sign-in failed', true);
+  if(!window.sb){ showAuthNotice('Still connecting — try again in a moment.', true); return; }
+  showAuthNotice('Redirecting to ' + (provider.charAt(0).toUpperCase()+provider.slice(1)) + ' …');
+  var r = await window.sb.auth.signInWithOAuth({ provider: provider, options:{ redirectTo: window.location.origin + window.location.pathname } });
+  if(r.error) showAuthNotice(r.error.message || 'Sign-in failed.', true);
 }
 
 </script>
