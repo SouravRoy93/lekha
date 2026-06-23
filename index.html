@@ -569,6 +569,8 @@ function showAuthNotice(msg, err){
 function signOut(){
   if(!confirm('Sign out?')) return;
   if(window.sb) window.sb.auth.signOut();
+  window.cloudReady = false;
+  var ob=document.getElementById('onboardScreen'); if(ob) ob.style.display='none';
   document.getElementById('app').classList.remove('show');
   document.getElementById('authScreen').style.display='grid';
 }
@@ -2794,9 +2796,13 @@ async function onAuthedSession(session){
   var email = session.user.email;
   var name = (session.user.user_metadata && session.user.user_metadata.full_name) || (email ? email.split('@')[0] : 'User');
   currentUser = { id: session.user.id, email: email, name: name };
-  try { await cloudBootstrap(email, name); }
-  catch(e){ console.error('Cloud sync unavailable; using local cache.', e); toast('Working offline — cloud sync unavailable', true); }
-  enterApp();
+  try { await cloudBootstrap(email, name); }   // cloudBootstrap enters the app or shows onboarding
+  catch(e){
+    console.error('Cloud sync unavailable; using local cache.', e);
+    toast('Working offline — cloud sync unavailable', true);
+    if(state && state.workspaces && state.workspaces.length){ enterApp(); }
+    else { showOnboarding(email, name); }
+  }
 }
 function bootAuth(){
   if(!window.sb) return;
@@ -2813,21 +2819,25 @@ window.onSupabaseAuth = function(session){
   }
 };
 
+var FOUNDER_EMAIL = 'sourav.oyr@gmail.com';
 async function cloudBootstrap(email, name){
   var sb = window.sb;
   var res = await sb.from('workspaces').select('*');
   if(res.error) throw res.error;
   var wss = res.data || [];
+  window.cloudReady = true;
   if(wss.length){
     var built = [];
     for(var i=0;i<wss.length;i++){ built.push(await cloudPullWorkspace(wss[i])); }
     state = { user:{email:email,name:name,role:'Admin'}, workspaces: built, currentWorkspaceId: built[0].id, lastSync: Date.now() };
-    window.cloudReady = true;
     localStorage.setItem(LS_KEY, JSON.stringify(state));
-  } else {
+    enterApp();
+    return;
+  }
+  if(email === FOUNDER_EMAIL){
+    // Founder/demo account: keep existing local books (or sample) and sync them up.
     if(!state || !state.workspaces || !state.workspaces.length){ state = createInitialState({email:email,name:name}); }
     else { state.user = {email:email,name:name,role:'Admin'}; }
-    window.cloudReady = true;
     for(var j=0;j<state.workspaces.length;j++){
       var w = state.workspaces[j];
       var ins = await sb.from('workspaces').insert({ id:w.id, name:w.name, gstin:(w.gstin&&w.gstin.length===15?w.gstin:null), address:w.address, base_currency:w.currency||'INR', color:w.color, color2:w.color2, initial:w.initial, created_by: currentUser.id });
@@ -2835,7 +2845,73 @@ async function cloudBootstrap(email, name){
       await cloudPush(w);
     }
     localStorage.setItem(LS_KEY, JSON.stringify(state));
+    enterApp();
+  } else {
+    // Every new user starts from scratch with their own company details.
+    showOnboarding(email, name);
   }
+}
+
+function createEmptyWorkspace(info){
+  var id = uid();
+  return {
+    id:id, name:info.name, gstin:info.gstin||'', address:info.address||'',
+    currency:info.currency||'INR', fyStart:'Apr 1',
+    color:'#7C8CFF', color2:'#9D7BFF', initial:(info.name||'?').trim().charAt(0).toUpperCase(),
+    customers:[], vendors:[], items:[], accounts:[], invoices:[], bills:[], transactions:[],
+    activity:[{id:uid(), when:new Date().toISOString().slice(0,16).replace('T',' '), who:'System', action:'Created', detail:'Workspace created'}],
+    invCounter:1, billCounter:1
+  };
+}
+
+function obNotice(msg, err){
+  var el=document.getElementById('obNotice'); if(!el) return;
+  el.style.cssText='margin-top:12px;font-size:13px;border-radius:8px;padding:10px 12px;background:var(--surface-2);border:1px solid '+(err?'rgba(240,106,106,.5)':'var(--border)')+';color:'+(err?'#ff8a8a':'var(--brand)');
+  el.textContent=msg;
+}
+
+function showOnboarding(email, name){
+  var auth=document.getElementById('authScreen'); if(auth) auth.style.display='none';
+  var scr=document.getElementById('onboardScreen');
+  if(!scr){ scr=document.createElement('div'); scr.id='onboardScreen'; scr.style.cssText='position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:24px;overflow:auto'; document.body.appendChild(scr); }
+  scr.dataset.email=email; scr.dataset.name=name;
+  scr.innerHTML =
+    '<div class="auth-card" style="max-width:440px;width:100%">'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:20px"><div style="width:34px;height:34px;border-radius:9px;background:var(--brand-grad);display:flex;align-items:center;justify-content:center;color:#fff;font-family:Fraunces,serif;font-weight:600">L</div><div style="font-family:Fraunces,serif;font-size:20px;font-weight:600">Lekha</div></div>'
+    + '<h1 class="auth-title">Set up your business</h1>'
+    + '<p class="auth-sub">A clean set of books, just for you. You can change any of this later in Settings.</p>'
+    + '<div class="auth-field"><label>Business name *</label><input id="ob_name" placeholder="Acme Pvt Ltd" /></div>'
+    + '<div class="auth-field"><label>GSTIN (optional)</label><input id="ob_gstin" placeholder="29ABCDE1234F1Z5" maxlength="15" /></div>'
+    + '<div class="auth-field"><label>Address (optional)</label><input id="ob_addr" placeholder="City, State" /></div>'
+    + '<div class="auth-field"><label>Base currency</label><select id="ob_cur"><option value="INR">INR - Rupee</option><option value="USD">USD - Dollar</option><option value="AED">AED - Dirham</option><option value="GBP">GBP - Pound</option><option value="EUR">EUR - Euro</option></select></div>'
+    + '<button class="auth-btn" id="ob_btn" onclick="finishOnboarding()">Create my workspace -></button>'
+    + '<div id="obNotice"></div>'
+    + '<div class="auth-foot">Signed in as ' + escapeHtml(email) + ' &middot; <a onclick="signOut()">Sign out</a></div>'
+    + '</div>';
+  scr.style.display='flex';
+}
+
+async function finishOnboarding(){
+  var scr=document.getElementById('onboardScreen'); if(!scr) return;
+  var email=scr.dataset.email, name=scr.dataset.name;
+  var nm=document.getElementById('ob_name').value.trim();
+  if(!nm){ obNotice('Business name is required.', true); return; }
+  var gstin=document.getElementById('ob_gstin').value.trim();
+  if(gstin && gstin.length!==15){ obNotice('GSTIN must be exactly 15 characters, or leave it blank.', true); return; }
+  var info={ name:nm, gstin:gstin, address:document.getElementById('ob_addr').value.trim(), currency:document.getElementById('ob_cur').value };
+  var w=createEmptyWorkspace(info);
+  state={ user:{email:email,name:name,role:'Admin'}, workspaces:[w], currentWorkspaceId:w.id, lastSync:Date.now() };
+  var btn=document.getElementById('ob_btn'); if(btn){ btn.disabled=true; btn.textContent='Creating...'; }
+  try{
+    if(window.cloudReady && window.sb){
+      var ins=await window.sb.from('workspaces').insert({ id:w.id, name:w.name, gstin:(w.gstin&&w.gstin.length===15?w.gstin:null), address:w.address, base_currency:w.currency, color:w.color, color2:w.color2, initial:w.initial, created_by:currentUser.id });
+      if(ins.error) throw ins.error;
+      await cloudPush(w);
+    }
+  }catch(e){ console.error(e); obNotice((e&&e.message)?e.message:'Could not create workspace.', true); if(btn){ btn.disabled=false; btn.textContent='Create my workspace ->'; } return; }
+  localStorage.setItem(LS_KEY, JSON.stringify(state));
+  scr.style.display='none';
+  enterApp();
 }
 
 async function cloudPullWorkspace(w){
