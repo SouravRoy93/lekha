@@ -361,16 +361,16 @@
       <h1 class="auth-title" id="authTitle">Welcome back</h1>
       <p class="auth-sub" id="authSub">Sign in to keep your books in sync with reality.</p>
 
-      <div class="auth-field"><label>Email</label><input id="authEmail" type="email" placeholder="you@company.com" value="sourav@aromacoffee.in" /></div>
+      <div class="auth-field"><label>Email</label><input id="authEmail" type="email" placeholder="you@company.com" /></div>
       <div class="auth-field" id="nameField" style="display:none"><label>Your name</label><input id="authName" type="text" placeholder="Sourav Kumar" /></div>
-      <div class="auth-field"><label>Password</label><input id="authPw" type="password" placeholder="••••••••" value="demopass" /></div>
+      <div class="auth-field"><label>Password</label><input id="authPw" type="password" placeholder="••••••••" /></div>
 
       <button class="auth-btn" id="authBtn" onclick="doAuth()">Sign in →</button>
 
       <div class="auth-divider">or</div>
       <div class="auth-soc">
-        <button onclick="doAuth()">G  Google</button>
-        <button onclick="doAuth()">⌘  Apple</button>
+        <button onclick="toast('Social sign-in is coming soon — use email for now')">G  Google</button>
+        <button onclick="toast('Social sign-in is coming soon — use email for now')">⌘  Apple</button>
       </div>
 
       <div class="auth-foot">
@@ -535,18 +535,36 @@ function toggleAuthMode(){
     : `Already have an account? <a onclick="toggleAuthMode()">Sign in</a>`;
 }
 
-function doAuth(){
-  const email = document.getElementById('authEmail').value.trim() || 'user@lekha.in';
-  const name = (document.getElementById('authName').value.trim()) || email.split('@')[0].replace(/[._]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
-  if(!state){
-    state = createInitialState({email, name});
-    saveState();
-  }
-  enterApp();
+async function doAuth(){
+  if(!window.sb){ toast('Still connecting to the server — try again in a moment', true); return; }
+  const email = document.getElementById('authEmail').value.trim();
+  const pw = document.getElementById('authPw').value;
+  const name = document.getElementById('authName').value.trim();
+  if(!email || !pw){ toast('Email and password are required', true); return; }
+  const btn = document.getElementById('authBtn'); if(btn) btn.disabled = true;
+  try{
+    if(authMode==='signup'){
+      const res = await window.sb.auth.signUp({ email: email, password: pw, options:{ data:{ full_name: name || email.split('@')[0] }, emailRedirectTo: window.location.href } });
+      if(res.error) throw res.error;
+      if(res.data && res.data.session){ onAuthedSession(res.data.session); }
+      else { showAuthNotice('Almost there — check your inbox to confirm your email, then sign in.'); }
+    } else {
+      const res = await window.sb.auth.signInWithPassword({ email: email, password: pw });
+      if(res.error) throw res.error;
+      onAuthedSession(res.data.session);
+    }
+  }catch(e){ toast((e && e.message) ? e.message : 'Authentication failed', true); }
+  finally{ if(btn) btn.disabled = false; }
+}
+function showAuthNotice(msg){
+  let el = document.getElementById('authNotice');
+  if(!el){ el = document.createElement('div'); el.id='authNotice'; el.style.cssText='margin-top:14px;font-size:13px;color:var(--brand);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;line-height:1.5'; var card=document.querySelector('.auth-card'); if(card) card.appendChild(el); }
+  el.textContent = msg;
 }
 
 function signOut(){
-  if(!confirm('Sign out? Your data stays on this device.')) return;
+  if(!confirm('Sign out?')) return;
+  if(window.sb) window.sb.auth.signOut();
   document.getElementById('app').classList.remove('show');
   document.getElementById('authScreen').style.display='grid';
 }
@@ -2761,11 +2779,39 @@ function enterApp(){
   setTimeout(updateNotifBadge, 100);
 }
 
-// Auto-resume session
-if(state && state.workspaces?.length){
+// --- Supabase auth gating (Phase 1: real login; books still local) ---
+function onAuthedSession(session){
+  if(!session) return;
+  var email = session.user.email;
+  var name = (session.user.user_metadata && session.user.user_metadata.full_name) || (email ? email.split('@')[0] : 'User');
+  if(!state){ state = createInitialState({email: email, name: name}); saveState(); }
   enterApp();
 }
+function bootAuth(){
+  if(!window.sb) return;
+  window.sb.auth.getSession().then(function(r){
+    if(r && r.data && r.data.session){ onAuthedSession(r.data.session); }
+  });
+}
+window.onSupabaseAuth = function(session){
+  if(session){ onAuthedSession(session); }
+  else {
+    document.getElementById('app').classList.remove('show');
+    document.getElementById('authScreen').style.display='grid';
+  }
+};
 
+</script>
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+  window.sb = createClient(
+    'https://rojvtijoyysyoqawoyzc.supabase.co',
+    'sb_publishable_YXYvj8h1qs0clvg0BqqTrA_0HrIAMTy'
+  );
+  window.sb.auth.onAuthStateChange(function(_event, session){
+    if (window.onSupabaseAuth) window.onSupabaseAuth(session);
+  });
+  if (window.bootAuth) window.bootAuth();
 </script>
 </body>
 </html>
