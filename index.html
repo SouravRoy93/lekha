@@ -421,6 +421,7 @@
       <div class="nav-item" data-view="contacts"><span class="nav-icon">◑</span>Contacts</div>
       <div class="nav-item" data-view="items"><span class="nav-icon">▦</span>Items</div>
       <div class="nav-item" data-view="reports"><span class="nav-icon">⊞</span>Reports</div>
+      <div class="nav-item" data-view="ledger"><span class="nav-icon">≡</span>Ledger</div>
     </div>
 
     <div class="nav-section">
@@ -789,6 +790,7 @@ function switchView(v){
     contacts:['Contacts','Customers & vendors'],
     items:['Items','Products & services'],
     reports:['Reports','Financial statements'],
+    ledger:['Ledger','Double-entry books'],
     gst:['GST','Tax & filings'],
     copilot:['AI Copilot','Ask anything'],
     activity:['Activity','Audit trail'],
@@ -873,6 +875,7 @@ function renderView(){
     case 'contacts':  c.innerHTML = renderContacts();  break;
     case 'items':     c.innerHTML = renderItems();     break;
     case 'reports':   c.innerHTML = renderReports();   break;
+    case 'ledger':    c.innerHTML = renderLedger();    bindLedger(); break;
     case 'gst':       c.innerHTML = renderGst();       break;
     case 'copilot':   c.innerHTML = renderCopilot();   bindCopilot(); break;
     case 'activity':  c.innerHTML = renderActivity();  break;
@@ -2524,6 +2527,150 @@ function previewReminders(){ previewFeature('Bulk payment reminders', 'Lekha wou
 function previewAutopay(){ previewFeature('Card auto-pay', 'Lekha would schedule automatic credit-card payments from your chosen bank account before each due date.'); }
 function gotoGST(){ switchView('gst'); }
 
+/* ====================================================
+   VIEW: LEDGER (double-entry, cloud-backed)
+   ==================================================== */
+var _coaCache = [];
+function renderLedger(){
+  return `
+    <div class="page-head">
+      <div><h1 class="page-title">Ledger</h1><p class="page-sub">Double-entry books · chart of accounts, journals &amp; balanced statements</p></div>
+      <div class="page-actions">
+        <button class="btn btn-ghost" onclick="openNewLedgerAccount()">+ Account</button>
+        <button class="btn btn-primary" onclick="openNewJournal()">+ Journal entry</button>
+      </div>
+    </div>
+    <div id="ledgerBody"><div class="card"><div class="card-body" style="padding:30px;text-align:center;color:var(--text-mute)">Loading ledger…</div></div></div>`;
+}
+async function bindLedger(){
+  var body = document.getElementById('ledgerBody'); if(!body) return;
+  if(!window.sb || !window.cloudReady){ body.innerHTML = '<div class="card"><div class="card-body" style="padding:24px;color:var(--text-dim)">The ledger lives in the cloud — please sign in to view your double-entry books.</div></div>'; return; }
+  var wsId = ws().id;
+  try{
+    var r = await Promise.all([
+      window.sb.from('chart_of_accounts').select('*').eq('workspace_id',wsId).order('code'),
+      window.sb.from('v_account_balances').select('*').eq('workspace_id',wsId),
+      window.sb.from('v_balance_sheet').select('*').eq('workspace_id',wsId),
+      window.sb.from('journal_entries').select('id,entry_no,entry_date,narration,source_type').eq('workspace_id',wsId).order('entry_date',{ascending:false}).limit(25)
+    ]);
+    _coaCache = r[0].data || [];
+    var bsArr = r[2].data || [];
+    body.innerHTML = ledgerHtml(_coaCache, r[1].data||[], bsArr[0]||{}, r[3].data||[]);
+  }catch(e){ console.error(e); body.innerHTML = '<div class="card"><div class="card-body" style="color:#ff8a8a;padding:24px">Could not load ledger: '+escapeHtml((e&&e.message)||'error')+'</div></div>'; }
+}
+function ledgerHtml(coa, balances, bs, jes){
+  var M = function(v){ return fmt((Number(v)||0)/100); };
+  var tbDebit = balances.reduce(function(s,b){return s+Number(b.total_debit_minor||0);},0);
+  var tbCredit= balances.reduce(function(s,b){return s+Number(b.total_credit_minor||0);},0);
+  var balanced = (tbDebit===tbCredit);
+  var assets = Number(bs.assets_minor||0), liabs = Number(bs.liabilities_minor||0), eqt = Number(bs.total_equity_minor||0), bsBal = !!bs.balanced;
+  var coaRows = coa.map(function(a){
+    var bal = balances.find(function(b){return b.account_id===a.account_id || b.code===a.code;}) || {net_debit_minor:0};
+    var nd = Number(bal.net_debit_minor||0);
+    var disp = (a.class==='asset'||a.class==='expense') ? nd : -nd;
+    return '<tr><td class="mono">'+escapeHtml(a.code)+'</td><td>'+escapeHtml(a.name)+'</td><td><span class="pill">'+escapeHtml(a.class)+'</span></td><td class="num text-right">'+M(disp)+'</td></tr>';
+  }).join('');
+  var jeRows = jes.map(function(j){
+    return '<tr><td class="mono">'+escapeHtml(j.entry_no||'')+'</td><td>'+escapeHtml(j.entry_date||'')+'</td><td>'+escapeHtml(j.narration||'')+'</td><td><span class="pill">'+escapeHtml(j.source_type||'manual')+'</span></td></tr>';
+  }).join('') || '<tr><td colspan="4" class="text-dim" style="text-align:center;padding:20px">No journal entries yet — tap “+ Journal entry”.</td></tr>';
+  return ''
+   + '<div class="kpi-grid">'
+   +   '<div class="kpi-card"><div class="kpi-label">Total Assets</div><div class="kpi-value">'+M(assets)+'</div><div class="kpi-delta">From the ledger</div></div>'
+   +   '<div class="kpi-card"><div class="kpi-label">Liabilities</div><div class="kpi-value">'+M(liabs)+'</div><div class="kpi-delta">What you owe</div></div>'
+   +   '<div class="kpi-card"><div class="kpi-label">Equity</div><div class="kpi-value">'+M(eqt)+'</div><div class="kpi-delta">Capital + retained earnings</div></div>'
+   +   '<div class="kpi-card '+(bsBal?'':'')+'"><div class="kpi-label">Balance check</div><div class="kpi-value" style="font-size:18px;color:'+(bsBal?'var(--green)':'var(--red)')+'">'+(bsBal?'✓ Balanced':'⚠ Off')+'</div><div class="kpi-delta">Assets = Liab + Equity</div></div>'
+   + '</div>'
+   + '<div class="two-col">'
+   +   '<div class="card"><div class="card-head"><div><div class="card-title">Trial Balance</div><div class="card-sub">Debits must equal credits</div></div></div>'
+   +     '<table class="tbl"><tbody>'
+   +       '<tr><td><strong style="color:var(--text)">Total Debits</strong></td><td class="num text-right">'+M(tbDebit)+'</td></tr>'
+   +       '<tr><td><strong style="color:var(--text)">Total Credits</strong></td><td class="num text-right">'+M(tbCredit)+'</td></tr>'
+   +       '<tr style="background:var(--surface-2)"><td><strong>Status</strong></td><td class="num text-right" style="color:'+(balanced?'var(--green)':'var(--red)')+'"><strong>'+(balanced?'✓ Balanced':'⚠ Unbalanced')+'</strong></td></tr>'
+   +     '</tbody></table></div>'
+   +   '<div class="card"><div class="card-head"><div><div class="card-title">Balance Sheet</div><div class="card-sub">As of today · from the ledger</div></div></div>'
+   +     '<table class="tbl"><tbody>'
+   +       '<tr><td>Total Assets</td><td class="num text-right">'+M(assets)+'</td></tr>'
+   +       '<tr><td>Total Liabilities</td><td class="num text-right">'+M(liabs)+'</td></tr>'
+   +       '<tr style="background:var(--surface-2)"><td><strong>Total Equity</strong></td><td class="num text-right"><strong>'+M(eqt)+'</strong></td></tr>'
+   +     '</tbody></table></div>'
+   + '</div>'
+   + '<div class="card"><div class="card-head"><div><div class="card-title">Chart of Accounts</div><div class="card-sub">'+coa.length+' accounts</div></div></div>'
+   +   '<table class="tbl"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th class="text-right">Balance</th></tr></thead><tbody>'+coaRows+'</tbody></table></div>'
+   + '<div class="card"><div class="card-head"><div><div class="card-title">Recent Journal Entries</div><div class="card-sub">Every posting is a balanced double entry</div></div></div>'
+   +   '<table class="tbl"><thead><tr><th>Entry</th><th>Date</th><th>Narration</th><th>Source</th></tr></thead><tbody>'+jeRows+'</tbody></table></div>';
+}
+function openNewLedgerAccount(){
+  openModal('New ledger account', ''
+   + '<div class="field"><label>Code</label><input id="la_code" placeholder="e.g. 5600" /></div>'
+   + '<div class="field"><label>Name</label><input id="la_name" placeholder="e.g. Office Supplies" /></div>'
+   + '<div class="field"><label>Type</label><select id="la_class"><option value="asset">Asset</option><option value="liability">Liability</option><option value="equity">Equity</option><option value="income">Income</option><option value="expense">Expense</option></select></div>'
+   + '<div id="laNotice"></div>',
+   [{label:'Cancel',class:'btn-ghost',onclick:closeOverlays},{label:'Add account',class:'btn-primary',onclick:saveLedgerAccount}]);
+}
+async function saveLedgerAccount(){
+  var code=document.getElementById('la_code').value.trim();
+  var name=document.getElementById('la_name').value.trim();
+  var cls=document.getElementById('la_class').value;
+  var note=document.getElementById('laNotice');
+  if(!code || !name){ if(note){note.style.cssText='margin-top:10px;color:#ff8a8a;font-size:13px';note.textContent='Code and name are required.';} return; }
+  try{
+    var r=await window.sb.from('chart_of_accounts').insert({workspace_id:ws().id, code:code, name:name, class:cls, is_system:false});
+    if(r.error) throw r.error;
+    closeOverlays(); toast('Account added'); bindLedger();
+  }catch(e){ if(note){note.style.cssText='margin-top:10px;color:#ff8a8a;font-size:13px';note.textContent=(e&&e.message)||'Could not add account.';} }
+}
+function openNewJournal(){
+  if(!_coaCache.length){ toast('Open the Ledger first so accounts load', true); return; }
+  var opts = '<option value="">— account —</option>'+_coaCache.map(function(a){return '<option value="'+escapeHtml(a.code)+'">'+escapeHtml(a.code+' · '+a.name)+'</option>';}).join('');
+  var rows='';
+  for(var i=0;i<5;i++){
+    rows += '<div class="field-row" style="gap:8px;margin-bottom:6px">'
+      + '<select id="jr_code_'+i+'" style="flex:2" oninput="updateJournalBalance()">'+opts+'</select>'
+      + '<input id="jr_dr_'+i+'" type="number" placeholder="Debit" style="flex:1" oninput="updateJournalBalance()" />'
+      + '<input id="jr_cr_'+i+'" type="number" placeholder="Credit" style="flex:1" oninput="updateJournalBalance()" /></div>';
+  }
+  openModal('New journal entry', ''
+   + '<div class="field-row"><div class="field"><label>Date</label><input id="jl_date" type="date" value="'+new Date().toISOString().slice(0,10)+'" /></div>'
+   + '<div class="field"><label>Narration</label><input id="jl_narr" placeholder="What is this entry for?" /></div></div>'
+   + '<div style="font-size:11px;color:var(--text-mute);margin:8px 0 4px">Each line is a debit OR a credit. Debits must equal credits.</div>'
+   + rows
+   + '<div id="jBalance" style="margin-top:8px;font-size:13px;color:var(--text-dim)">Debits ₹0 · Credits ₹0</div>'
+   + '<div id="jNotice"></div>',
+   [{label:'Cancel',class:'btn-ghost',onclick:closeOverlays},{label:'Post entry',class:'btn-primary',onclick:postJournalEntry}]);
+}
+function collectJournalLines(){
+  var lines=[];
+  for(var i=0;i<5;i++){
+    var c=document.getElementById('jr_code_'+i); if(!c) continue;
+    var code=c.value;
+    var dr=parseFloat((document.getElementById('jr_dr_'+i)||{}).value)||0;
+    var cr=parseFloat((document.getElementById('jr_cr_'+i)||{}).value)||0;
+    if(code && (dr>0 || cr>0)){ var ln={code:code}; if(dr>0) ln.debit=dr; if(cr>0) ln.credit=cr; lines.push(ln); }
+  }
+  return lines;
+}
+function updateJournalBalance(){
+  var lines=collectJournalLines();
+  var d=lines.reduce(function(s,l){return s+(l.debit||0);},0);
+  var c=lines.reduce(function(s,l){return s+(l.credit||0);},0);
+  var el=document.getElementById('jBalance'); if(!el) return;
+  var diff=Math.round((d-c)*100)/100;
+  el.innerHTML='Debits '+fmt(d)+' · Credits '+fmt(c)+(diff===0?' · <span style="color:var(--green)">Balanced ✓</span>':' · <span style="color:var(--amber)">Off by '+fmt(Math.abs(diff))+'</span>');
+}
+async function postJournalEntry(){
+  var note=document.getElementById('jNotice');
+  function err(m){ if(note){note.style.cssText='margin-top:10px;color:#ff8a8a;font-size:13px';note.textContent=m;} }
+  var lines=collectJournalLines();
+  if(lines.length<2){ err('Add at least two lines (one debit, one credit).'); return; }
+  var d=lines.reduce(function(s,l){return s+(l.debit||0);},0);
+  var c=lines.reduce(function(s,l){return s+(l.credit||0);},0);
+  if(Math.round(d*100)!==Math.round(c*100)){ err('Debits ('+fmt(d)+') must equal credits ('+fmt(c)+').'); return; }
+  try{
+    var r=await window.sb.rpc('post_journal',{ p_workspace:ws().id, p_date:document.getElementById('jl_date').value||null, p_narration:document.getElementById('jl_narr').value||'Manual journal', p_lines:lines, p_source_type:'manual' });
+    if(r.error) throw r.error;
+    closeOverlays(); toast('Journal entry posted'); bindLedger();
+  }catch(e){ err((e&&e.message)||'Could not post entry.'); }
+}
 function openModal(title, body, actions){
   const m = document.getElementById('modal');
   m.querySelector('.modal-head').innerHTML = `<div style="font-size:16px;font-weight:600">${escapeHtml(title)}</div><button class="btn btn-icon btn-ghost" onclick="closeOverlays()">×</button>`;
