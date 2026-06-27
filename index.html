@@ -1208,6 +1208,31 @@ function openAddAccount(){
   ]);
 }
 
+/* ---- Auto-journal manual money in/out into the double-entry ledger ---- */
+function txnAccountCode(accountId){
+  var a = ws().accounts.find(function(x){return x.id===accountId;});
+  if(a && /cash/i.test(a.name||'')) return '1000';   // Cash
+  return '1010';                                       // Bank
+}
+function txnLedgerCode(amount, category){
+  if(Number(amount) >= 0){ return category==='Sales' ? '4000' : '4100'; }  // income
+  var m = {'COGS':'5000','Payroll':'5100','Rent':'5200','Infrastructure':'5300','Utilities':'5300','Software':'5500','Logistics':'5400','Marketing':'5900','Travel':'5900','Other':'5900'};
+  return m[category] || '5900';                         // expense
+}
+function journalForTxn(t){
+  if(!window.cloudReady || !window.sb) return;          // ledger is cloud-backed
+  var amt = Math.abs(Number(t.amount)||0); if(!amt) return;
+  var bank  = txnAccountCode(t.accountId);
+  var other = txnLedgerCode(t.amount, t.category);
+  var lines = (Number(t.amount) >= 0)
+    ? [{code:bank, debit:amt}, {code:other, credit:amt}]   // money in:  Dr Bank, Cr Income
+    : [{code:other, debit:amt}, {code:bank, credit:amt}];  // money out: Dr Expense, Cr Bank
+  try{
+    window.sb.rpc('post_journal', { p_workspace: ws().id, p_date: t.date||null, p_narration: t.description||'Transaction', p_lines: lines, p_source_type: 'transaction' })
+      .then(function(r){ if(r && r.error){ console.error('journal failed', r.error); } else if(currentView==='ledger'){ bindLedger(); } })
+      .catch(function(e){ console.error('journal error', e); });
+  }catch(e){ console.error(e); }
+}
 function openAddTxn(prefill){
   const w = ws();
   const accOptions = w.accounts.map(a=>`<option value="${a.id}" ${prefill?.accId===a.id?'selected':''}>${escapeHtml(a.name)}</option>`).join('');
@@ -1234,6 +1259,7 @@ function openAddTxn(prefill){
       if(!desc || !amount){ toast('Description and amount required', true); return; }
       const t = {id:uid(),accountId,description:desc,amount,type,category,date,auto:false};
       w.transactions.push(t);
+      journalForTxn(t);
       // update account balance
       const a = w.accounts.find(x=>x.id===accountId);
       if(a) a.balance += amount;
